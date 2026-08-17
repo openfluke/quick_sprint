@@ -3,6 +3,7 @@ package sprint
 import (
 	"bufio"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -44,4 +45,16 @@ func EnvOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func EnvInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }

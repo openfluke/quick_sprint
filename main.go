@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -23,9 +24,9 @@ func main() {
 	basePort := flag.Int("base-port", 8101, "first layer tide port (dense=base, cnn1=base+1, …)")
 	bind := flag.String("bind", sprint.EnvOr("TIDE_BIND", "0.0.0.0"), "host each layer tide binds")
 	mode := flag.String("mode", sprint.EnvOr("TIDE_MATRIX", "sprint"), "sprint | smoke | screen | full")
-	layers := flag.String("layers", "", "comma list (default: all 22)")
+	layers := flag.String("layers", sprint.EnvOr("TIDE_LAYERS", ""), "comma list (default: all 22)")
 	layer := flag.String("layer", sprint.EnvOr("TIDE_LAYER", ""), "run a single layer tide (worker; no local ocean)")
-	parallelN := flag.Int("parallel", 4, "how many layer tides train at once")
+	parallelN := flag.Int("parallel", sprint.EnvInt("TIDE_PARALLEL", 4), "how many layer tides train at once")
 	trainN := flag.Int("train-n", sprint.TrainN, "synthetic train examples per cell")
 	cellMS := flag.Int("cell-ms", sprint.CellMS, "min wall-clock ms per cell (0 = one epoch then stop)")
 	modes := flag.String("modes", sprint.EnvOr("TIDE_MODES", ""), "csv train-mode filter (sgd,step_sgd,Sparse,…) empty = all")
@@ -73,6 +74,39 @@ func main() {
 	if *layers != "" {
 		names = splitCSV(*layers)
 	}
+	n := *parallelN
+	if n < 1 {
+		n = 1
+	}
+
+	// Remote ocean + a layer list: one process, slot-queues the collection, no local ocean.
+	if !*oceanOnly && strings.TrimSpace(*oceanURL) != "" {
+		fmt.Println("════════════════════════════════════════════════════════════")
+		fmt.Println(" quick_sprint — farm worker (no local ocean)")
+		fmt.Printf(" ocean:  %s\n", strings.TrimRight(*oceanURL, "/"))
+		fmt.Printf(" layers: %s\n", strings.Join(names, ", "))
+		fmt.Printf(" parallel=%d  matrix=%s  modes=%s  train-n=%d  cell-ms=%d\n",
+			n, *mode, nzStar(*modes), *trainN, *cellMS)
+		fmt.Println(" one Ctrl+C stops every layer on this box")
+		fmt.Println("════════════════════════════════════════════════════════════")
+		spawnLayers(ctx, names, layerSpawn{
+			bind:      *bind,
+			basePort:  *basePort,
+			mode:      *mode,
+			trainN:    *trainN,
+			cellMS:    *cellMS,
+			modes:     *modes,
+			fresh:     *fresh,
+			parallel:  n,
+			oceanURL:  *oceanURL,
+			advertise: *advertise,
+			waitStart: true,
+			autostart: *autostart && *oceanURL == "",
+		})
+		<-ctx.Done()
+		fmt.Println("\nstopped — per-layer checkpoints under results/<layer>/checkpoint")
+		return
+	}
 
 	var oceanPeers []ocean.Peer
 	if *oceanOnly {
@@ -80,40 +114,18 @@ func main() {
 			oceanPeers = append(oceanPeers, ocean.Peer{Name: fmt.Sprintf("tide-%d", i+1), URL: strings.TrimRight(u, "/")})
 		}
 	} else {
-		n := *parallelN
-		if n < 1 {
-			n = 1
-		}
-		sem := make(chan struct{}, n)
-		var wg sync.WaitGroup
-		for i, name := range names {
-			if _, err := sprint.Lookup(name); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(2)
-			}
-			port := *basePort + i
-			addr := net.JoinHostPort(*bind, fmt.Sprintf("%d", port))
-			url := "http://" + net.JoinHostPort(loopback(*bind), fmt.Sprintf("%d", port))
-			oceanPeers = append(oceanPeers, ocean.Peer{Name: name, URL: url})
-			opt := sprint.DefaultOptions(name)
-			opt.Addr = addr
-			opt.Mode = *mode
-			opt.TrainN = *trainN
-			opt.CellMS = *cellMS
-			opt.Modes = *modes
-			opt.Fresh = *fresh
-			opt.Autostart = false
-			opt.WaitStart = true
-			opt.Limit = sem
-			wg.Add(1)
-			go func(opt sprint.Options) {
-				defer wg.Done()
-				if err := sprint.RunLayer(ctx, opt); err != nil && ctx.Err() == nil {
-					fmt.Fprintf(os.Stderr, "%s: %v\n", opt.Layer, err)
-				}
-			}(opt)
-		}
-		_ = wg
+		oceanPeers = spawnLayers(ctx, names, layerSpawn{
+			bind:      *bind,
+			basePort:  *basePort,
+			mode:      *mode,
+			trainN:    *trainN,
+			cellMS:    *cellMS,
+			modes:     *modes,
+			fresh:     *fresh,
+			parallel:  n,
+			waitStart: true,
+			autostart: false,
+		})
 	}
 
 	srv := &ocean.Server{
@@ -152,6 +164,77 @@ func main() {
 	}
 	<-ctx.Done()
 	fmt.Println("\nstopped — per-layer checkpoints under results/<layer>/checkpoint")
+}
+
+type layerSpawn struct {
+	bind      string
+	basePort  int
+	mode      string
+	trainN    int
+	cellMS    int
+	modes     string
+	fresh     bool
+	parallel  int
+	oceanURL  string
+	advertise string
+	waitStart bool
+	autostart bool
+}
+
+func spawnLayers(ctx context.Context, names []string, spec layerSpawn) []ocean.Peer {
+	if spec.parallel < 1 {
+		spec.parallel = 1
+	}
+	sem := make(chan struct{}, spec.parallel)
+	var peers []ocean.Peer
+	for i, name := range names {
+		if _, err := sprint.Lookup(name); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		port := spec.basePort + i
+		addr := net.JoinHostPort(spec.bind, fmt.Sprintf("%d", port))
+		local := "http://" + net.JoinHostPort(loopback(spec.bind), fmt.Sprintf("%d", port))
+		peers = append(peers, ocean.Peer{Name: name, URL: local})
+		opt := sprint.DefaultOptions(name)
+		opt.Addr = addr
+		opt.Mode = spec.mode
+		opt.TrainN = spec.trainN
+		opt.CellMS = spec.cellMS
+		opt.Modes = spec.modes
+		opt.Fresh = spec.fresh
+		opt.OceanURL = spec.oceanURL
+		opt.Advertise = advertiseFor(spec.advertise, addr)
+		opt.Autostart = spec.autostart
+		opt.WaitStart = spec.waitStart
+		opt.Limit = sem
+		go func(opt sprint.Options) {
+			if err := sprint.RunLayer(ctx, opt); err != nil && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", opt.Layer, err)
+			}
+		}(opt)
+	}
+	return peers
+}
+
+func advertiseFor(base, listen string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil || port == "" {
+		return strings.TrimRight(base, "/")
+	}
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	return scheme + "://" + net.JoinHostPort(u.Hostname(), port)
 }
 
 func startAll(peers []ocean.Peer) {
