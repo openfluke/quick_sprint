@@ -96,3 +96,23 @@ func TestGDNNonFloat32Gaps(t *testing.T) {
 		t.Fatal("expected gdn gap on int8")
 	}
 }
+
+func TestModeFilterShrinksMatrix(t *testing.T) {
+	opt := DefaultOptions("dense")
+	opt.Modes = "sgd,step_sgd"
+	if opt.peerName() != "dense-sgd_step_sgd" {
+		t.Fatalf("peer %q", opt.peerName())
+	}
+	only, err := permute.ParseModes(opt.Modes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, _ := cellsFor("sprint", nil)
+	part, cfg := cellsFor("sprint", only)
+	if len(cfg.Modes) != 2 {
+		t.Fatalf("modes %v", cfg.Modes)
+	}
+	if len(part) == 0 || len(part) >= len(full) {
+		t.Fatalf("part %d full %d", len(part), len(full))
+	}
+}

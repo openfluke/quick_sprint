@@ -1,0 +1,47 @@
+package sprint
+
+import (
+	"bufio"
+	"os"
+	"strings"
+)
+
+// LoadDotEnv sets KEY=VAL from a dotenv file if present. Existing env wins.
+func LoadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		v = strings.Trim(v, `"'`)
+		if k == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(k); exists {
+			continue
+		}
+		_ = os.Setenv(k, v)
+	}
+}
+
+func EnvOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}

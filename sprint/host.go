@@ -6,11 +6,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/openfluke/tide/checkpoint"
 	"github.com/openfluke/tide/dash"
+	"github.com/openfluke/tide/ocean"
 	"github.com/openfluke/tide/permute"
 	"github.com/openfluke/tide/pulse"
 	"github.com/openfluke/tide/report"
@@ -21,6 +23,10 @@ import (
 
 // Options is one layer tide.
 type Options struct {
+	Name      string // ocean peer id (default: layer or layer-modes)
+	Modes     string // csv train-mode filter (empty = all)
+	OceanURL  string // if set, register with this ocean master
+	Advertise string // public origin ocean should poll (empty = ocean uses RemoteAddr+port)
 	Layer     string
 	Addr      string
 	Mode      string // sprint | smoke | screen | full
@@ -34,7 +40,7 @@ type Options struct {
 	CkptSec   int
 	Fresh     bool
 	Autostart bool
-	WaitStart bool // if true, block on dashboard Start even when Autostart
+	WaitStart bool          // if true, block on dashboard Start even when Autostart
 	Limit     chan struct{} // optional worker pool (ocean orchestrator)
 }
 
@@ -55,7 +61,7 @@ func DefaultOptions(layer string) Options {
 	}
 }
 
-func cellsFor(mode string) ([]permute.Cell, permute.Config) {
+func cellsFor(mode string, only []permute.TrainMode) ([]permute.Cell, permute.Config) {
 	var pcfg permute.Config
 	switch mode {
 	case "full":
@@ -73,7 +79,33 @@ func cellsFor(mode string) ([]permute.Cell, permute.Config) {
 	if len(pcfg.Formats) == 0 {
 		pcfg.Formats = []quant.Format{quant.FormatNone}
 	}
+	if len(only) > 0 {
+		pcfg.Modes = only
+	}
 	return permute.Expand(pcfg), pcfg
+}
+
+func (opt Options) peerName() string {
+	if n := strings.TrimSpace(opt.Name); n != "" {
+		return n
+	}
+	if strings.TrimSpace(opt.Modes) == "" {
+		return opt.Layer
+	}
+	compact := strings.NewReplacer(",", "_", " ", "").Replace(opt.Modes)
+	if len(compact) > 48 {
+		compact = compact[:48]
+	}
+	return opt.Layer + "-" + compact
+}
+
+func listenPort(addr string) int {
+	_, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(p)
+	return n
 }
 
 // RunLayer starts this layer's tide dashboard + Lucy runner. Blocks until ctx done
@@ -101,7 +133,18 @@ func RunLayer(ctx context.Context, opt Options) error {
 	if opt.PulseMS < 1 {
 		opt.PulseMS = 50
 	}
-	cells, _ := cellsFor(opt.Mode)
+	var only []permute.TrainMode
+	if strings.TrimSpace(opt.Modes) != "" {
+		only, err = permute.ParseModes(opt.Modes)
+		if err != nil {
+			return err
+		}
+	}
+	peer := opt.peerName()
+	if peer != spec.Name && strings.Contains(opt.CkptDir, spec.Name+string(filepath.Separator)+"checkpoint") {
+		opt.CkptDir = filepath.Join("results", peer, "checkpoint")
+	}
+	cells, _ := cellsFor(opt.Mode, only)
 
 	store := checkpoint.New(opt.CkptDir, opt.Mode)
 	var resume *checkpoint.Progress
@@ -115,18 +158,18 @@ func RunLayer(ctx context.Context, opt Options) error {
 
 	tr := pulse.New()
 	srv := &dash.Server{
-		Tracker:  tr,
-		Cells:    cells,
-		Addr:     opt.Addr,
-		Epoch:    epoch,
-		Task:     spec.Name,
-		ID:       spec.Name,
-		Subtitle: fmt.Sprintf("%s layer · cameral 1/2/3 · %s · min %dms/cell · %d train · pulse %dms · SIMD %v",
-			spec.Name, spec.Strength, opt.CellMS, opt.TrainN, opt.PulseMS, simd.Enabled()),
+		Tracker: tr,
+		Cells:   cells,
+		Addr:    opt.Addr,
+		Epoch:   epoch,
+		Task:    spec.Name,
+		ID:      peer,
+		Subtitle: fmt.Sprintf("%s · %s · modes %s · min %dms/cell · %d train · pulse %dms · SIMD %v",
+			spec.Name, spec.Strength, nzModes(opt.Modes), opt.CellMS, opt.TrainN, opt.PulseMS, simd.Enabled()),
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
-			fmt.Fprintf(os.Stderr, "%s dash: %v\n", spec.Name, err)
+			fmt.Fprintf(os.Stderr, "%s dash: %v\n", peer, err)
 		}
 	}()
 
@@ -151,7 +194,20 @@ func RunLayer(ctx context.Context, opt Options) error {
 	ds := newSynth(spec, opt.TrainN, ValN, opt.Micro, 0x51524E54)
 
 	fmt.Printf(" tide %s  %s  cells=%d  dash=%s  simd=%v\n",
-		spec.Name, spec.Strength, len(cells), dashURLs(opt.Addr), simd.Enabled())
+		peer, spec.Strength, len(cells), dashURLs(opt.Addr), simd.Enabled())
+	if opt.OceanURL != "" {
+		reg := ocean.RegisterRequest{
+			Name:  peer,
+			URL:   strings.TrimSpace(opt.Advertise),
+			Port:  listenPort(opt.Addr),
+			Layer: spec.Name,
+		}
+		for _, m := range only {
+			reg.Modes = append(reg.Modes, string(m))
+		}
+		fmt.Printf(" tide %s registering with ocean %s\n", peer, opt.OceanURL)
+		go ocean.KeepRegistered(ctx, opt.OceanURL, reg)
+	}
 
 	doneN := len(checkpoint.DoneSet(resume))
 	runner.Hydrate(tr, cfg, fmt.Sprintf(
@@ -162,8 +218,8 @@ func RunLayer(ctx context.Context, opt Options) error {
 		srv.SignalStart()
 		tr.SetMeta(0, 0, len(cells), len(cells),
 			"epoch 1 done — one-epoch sprint (slot free for other layers)")
-		fmt.Printf(" tide %s already finished epoch 1 — dashboard up, not training again\n", spec.Name)
-		writeLayerPDF(srv, opt, spec.Name, epoch)
+		fmt.Printf(" tide %s already finished epoch 1 — dashboard up, not training again\n", peer)
+		writeLayerPDF(srv, opt, peer, epoch)
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -197,10 +253,10 @@ func RunLayer(ctx context.Context, opt Options) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	fmt.Printf(" tide %s epoch %d complete — dashboard still up, worker slot released\n", spec.Name, epoch)
+	fmt.Printf(" tide %s epoch %d complete — dashboard still up, worker slot released\n", peer, epoch)
 	tr.SetMeta(0, 0, len(cells), len(cells),
 		fmt.Sprintf("epoch %d done — one-epoch sprint (slot free for other layers)", epoch))
-	writeLayerPDF(srv, opt, spec.Name, epoch)
+	writeLayerPDF(srv, opt, peer, epoch)
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -258,6 +314,13 @@ func doneIDsFromCompleted(p *checkpoint.Progress) []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+func nzModes(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "all"
+	}
+	return s
 }
 
 func dashURLs(addr string) string {

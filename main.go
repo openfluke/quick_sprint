@@ -18,18 +18,25 @@ import (
 )
 
 func main() {
-	oceanAddr := flag.String("ocean", "0.0.0.0:8090", "ocean (master) dashboard address")
+	sprint.LoadDotEnv(".env")
+	oceanAddr := flag.String("ocean", sprint.EnvOr("TIDE_OCEAN_BIND", "0.0.0.0:8090"), "ocean (master) dashboard address")
 	basePort := flag.Int("base-port", 8101, "first layer tide port (dense=base, cnn1=base+1, …)")
-	bind := flag.String("bind", "0.0.0.0", "host each layer tide binds (0.0.0.0 = reachable on the LAN; ocean still polls 127.0.0.1)")
-	mode := flag.String("mode", "sprint", "sprint | smoke | screen | full")
+	bind := flag.String("bind", sprint.EnvOr("TIDE_BIND", "0.0.0.0"), "host each layer tide binds")
+	mode := flag.String("mode", sprint.EnvOr("TIDE_MATRIX", "sprint"), "sprint | smoke | screen | full")
 	layers := flag.String("layers", "", "comma list (default: all 22)")
-	layer := flag.String("layer", "", "run a single layer tide (no ocean)")
+	layer := flag.String("layer", sprint.EnvOr("TIDE_LAYER", ""), "run a single layer tide (worker; no local ocean)")
 	parallelN := flag.Int("parallel", 4, "how many layer tides train at once")
 	trainN := flag.Int("train-n", sprint.TrainN, "synthetic train examples per cell")
-	cellMS := flag.Int("cell-ms", sprint.CellMS, "min wall-clock ms per cell (0 = one epoch then stop; 2000 = test48 perm race)")
-	autostart := flag.Bool("autostart", true, "signal Start on every layer tide after dashboards are up")
-	oceanOnly := flag.Bool("ocean-only", false, "only serve ocean; poll -peers (any existing tides)")
-	peers := flag.String("peers", "", "ocean-only: comma list of tide origins")
+	cellMS := flag.Int("cell-ms", sprint.CellMS, "min wall-clock ms per cell (0 = one epoch then stop)")
+	modes := flag.String("modes", sprint.EnvOr("TIDE_MODES", ""), "csv train-mode filter (sgd,step_sgd,Sparse,…) empty = all")
+	oceanURL := flag.String("ocean-url", sprint.EnvOr("TIDE_OCEAN", ""), "remote ocean master; this tide POSTs /api/register")
+	advertise := flag.String("advertise", sprint.EnvOr("TIDE_ADVERTISE", ""), "public origin for ocean to poll (empty = ocean uses this Pi's source IP + port)")
+	peerName := flag.String("name", sprint.EnvOr("TIDE_NAME", ""), "ocean peer id (default: layer or layer-modes)")
+	addr := flag.String("addr", sprint.EnvOr("TIDE_ADDR", ""), "worker listen address (default 0.0.0.0:8080)")
+	oceanOnly := flag.Bool("ocean-only", false, "only serve ocean; poll -peers and/or wait for worker /api/register")
+	autostart := flag.Bool("autostart", true, "start training without waiting for ocean Start all")
+	waitStart := flag.Bool("wait-start", false, "wait for /api/start (implied when -ocean-url is set)")
+	peers := flag.String("peers", sprint.EnvOr("TIDE_PEERS", ""), "ocean-only: comma list of tide origins (optional if workers register)")
 	fresh := flag.Bool("fresh", false, "ignore per-layer checkpoints")
 	flag.Parse()
 
@@ -41,8 +48,20 @@ func main() {
 		opt.Mode = *mode
 		opt.TrainN = *trainN
 		opt.CellMS = *cellMS
-		opt.Autostart = *autostart
+		opt.Modes = *modes
+		opt.OceanURL = *oceanURL
+		opt.Advertise = *advertise
+		opt.Name = *peerName
 		opt.Fresh = *fresh
+		if *addr != "" {
+			opt.Addr = *addr
+		}
+		if *oceanURL != "" || *waitStart {
+			opt.WaitStart = true
+			opt.Autostart = *autostart && *oceanURL == ""
+		} else {
+			opt.Autostart = *autostart
+		}
 		if err := sprint.RunLayer(ctx, opt); err != nil && ctx.Err() == nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -59,10 +78,6 @@ func main() {
 	if *oceanOnly {
 		for i, u := range splitCSV(*peers) {
 			oceanPeers = append(oceanPeers, ocean.Peer{Name: fmt.Sprintf("tide-%d", i+1), URL: strings.TrimRight(u, "/")})
-		}
-		if len(oceanPeers) == 0 {
-			fmt.Fprintln(os.Stderr, "ocean-only needs -peers http://127.0.0.1:8080,...")
-			os.Exit(2)
 		}
 	} else {
 		n := *parallelN
@@ -85,6 +100,7 @@ func main() {
 			opt.Mode = *mode
 			opt.TrainN = *trainN
 			opt.CellMS = *cellMS
+			opt.Modes = *modes
 			opt.Fresh = *fresh
 			opt.Autostart = false
 			opt.WaitStart = true
@@ -109,9 +125,13 @@ func main() {
 	fmt.Println("════════════════════════════════════════════════════════════")
 	fmt.Println(" quick_sprint — one tide per Welvet layer, ocean consolidates")
 	fmt.Printf(" ocean:  %s\n", httpURL(*oceanAddr))
-	fmt.Printf(" layers: %d  parallel=%d  mode=%s  train-n=%d  cell-ms=%d\n", len(oceanPeers), *parallelN, *mode, *trainN, *cellMS)
-	fmt.Println(" each tide: per-layer toy (XOR / sine / delay / assoc) · Lucy min wall per cell")
+	fmt.Printf(" layers: %d  parallel=%d  matrix=%s  modes=%s  train-n=%d  cell-ms=%d\n",
+		len(oceanPeers), *parallelN, *mode, nzStar(*modes), *trainN, *cellMS)
+	fmt.Println(" workers POST /api/register · ocean Start all kicks them")
 	fmt.Println("════════════════════════════════════════════════════════════")
+	if len(oceanPeers) == 0 {
+		fmt.Println("  (no static peers — waiting for worker /api/register)")
+	}
 	for _, p := range oceanPeers {
 		fmt.Printf("  %-14s %s\n", p.Name, p.URL)
 	}
@@ -125,6 +145,8 @@ func main() {
 	if !*oceanOnly && *autostart {
 		fmt.Println("Autostart — signaling every layer /api/start (training queued by -parallel).")
 		go startAll(oceanPeers)
+	} else if *oceanOnly {
+		fmt.Println("Master — workers register, then press Start all.")
 	} else {
 		fmt.Println("Press Start all on ocean, or Start on a layer tide.")
 	}
@@ -185,4 +207,11 @@ func httpURL(addr string) string {
 		host = "127.0.0.1"
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+func nzStar(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "all"
+	}
+	return s
 }
