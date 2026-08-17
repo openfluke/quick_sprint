@@ -5,43 +5,44 @@ import "fmt"
 const (
 	Batch   = 8
 	Classes = 4
-	TrainN  = 256
-	ValN    = 64
+	TrainN  = 1024
+	ValN    = 128
+	CellMS  = 2000 // Lucy-style wall clock per cell (test48 perm race is 2s)
 )
 
-// Spec describes one layer sprint: a tiny task that plays to that layer.
+// Spec describes one layer sprint: a toy that actually needs that mid Op.
 type Spec struct {
-	Name      string
-	Strength  string
-	Shape     []int // input shape without batch
-	Kind      string // blob | sine1 | spatial | volume | seq | tokens | latent1 | latent2 | latent3
-	NeedHead  bool   // false for kmeans (cluster probs = classes)
+	Name     string
+	Strength string
+	Shape    []int  // input shape without batch
+	Kind     string // xor | xor-scale | sine1 | spatial | volume | delay | assoc | tokens | latent
+	NeedHead bool   // false for kmeans (cluster probs = classes)
 }
 
 func AllSpecs() []Spec {
 	return []Spec{
-		{Name: "dense", Strength: "class-conditional 8D blobs", Shape: []int{8}, Kind: "blob", NeedHead: true},
-		{Name: "cnn1", Strength: "1D sine frequency", Shape: []int{1, 16}, Kind: "sine1", NeedHead: true},
-		{Name: "cnn2", Strength: "tiny spatial patterns", Shape: []int{1, 6, 6}, Kind: "spatial", NeedHead: true},
-		{Name: "cnn3", Strength: "tiny occupancy volume", Shape: []int{1, 4, 4, 4}, Kind: "volume", NeedHead: true},
-		{Name: "convt1", Strength: "1D upsample from a short latent", Shape: []int{2, 4}, Kind: "latent1", NeedHead: true},
-		{Name: "convt2", Strength: "2D upsample from a 2×2 latent", Shape: []int{2, 2, 2}, Kind: "latent2", NeedHead: true},
-		{Name: "convt3", Strength: "3D upsample from a 2³ latent", Shape: []int{2, 2, 2, 2}, Kind: "latent3", NeedHead: true},
-		{Name: "rnn", Strength: "short sequence → last-step class", Shape: []int{8, 4}, Kind: "seq", NeedHead: true},
-		{Name: "lstm", Strength: "gated sequence memory", Shape: []int{8, 4}, Kind: "seq", NeedHead: true},
-		{Name: "mha", Strength: "token mixing on 8×8", Shape: []int{8, 8}, Kind: "seq", NeedHead: true},
-		{Name: "mamba", Strength: "selective SSM on 8×8", Shape: []int{8, 8}, Kind: "seq", NeedHead: true},
-		{Name: "gdn", Strength: "gated delta net (float32 honest)", Shape: []int{8, 8}, Kind: "seq", NeedHead: true},
-		{Name: "embedding", Strength: "token-id lookup", Shape: []int{8}, Kind: "tokens", NeedHead: true},
-		{Name: "swiglu", Strength: "gated FFN on blobs", Shape: []int{8}, Kind: "blob", NeedHead: true},
-		{Name: "layernorm", Strength: "affine after a dense stem", Shape: []int{8}, Kind: "blob", NeedHead: true},
-		{Name: "rmsnorm", Strength: "RMS affine after a dense stem", Shape: []int{8}, Kind: "blob", NeedHead: true},
-		{Name: "softmax", Strength: "Dense→Softmax vs one-hot", Shape: []int{8}, Kind: "blob", NeedHead: false},
-		{Name: "kmeans", Strength: "soft clusters = classes", Shape: []int{8}, Kind: "blob", NeedHead: false},
-		{Name: "sequential", Strength: "stacked Dim→Dim dense", Shape: []int{8}, Kind: "blob", NeedHead: true},
-		{Name: "residual", Strength: "skip + dense F", Shape: []int{8}, Kind: "blob", NeedHead: true},
-		{Name: "parallel", Strength: "two-way add (cameral)", Shape: []int{8}, Kind: "blob", NeedHead: true},
-		{Name: "metacognition", Strength: "heuristic-wrapped dense", Shape: []int{8}, Kind: "blob", NeedHead: true},
+		{Name: "dense", Strength: "4-class pairwise XOR in noise", Shape: []int{8}, Kind: "xor", NeedHead: true},
+		{Name: "cnn1", Strength: "1D sine freq class, Lucy 1→2→3 switches", Shape: []int{1, 16}, Kind: "sine1", NeedHead: true},
+		{Name: "cnn2", Strength: "tiny spatial patterns (phase rotates)", Shape: []int{1, 8, 8}, Kind: "spatial", NeedHead: true},
+		{Name: "cnn3", Strength: "tiny occupancy volume (phase rotates)", Shape: []int{1, 4, 4, 4}, Kind: "volume", NeedHead: true},
+		{Name: "convt1", Strength: "1D upsample from XOR latent", Shape: []int{2, 4}, Kind: "latent", NeedHead: true},
+		{Name: "convt2", Strength: "2D upsample from XOR latent", Shape: []int{2, 2, 2}, Kind: "latent", NeedHead: true},
+		{Name: "convt3", Strength: "3D upsample from XOR latent", Shape: []int{2, 2, 2, 2}, Kind: "latent", NeedHead: true},
+		{Name: "rnn", Strength: "class cue at t=0, answer at last step", Shape: []int{8, 4}, Kind: "delay", NeedHead: true},
+		{Name: "lstm", Strength: "gated delay: cue early, ignore the rest", Shape: []int{8, 4}, Kind: "delay", NeedHead: true},
+		{Name: "mha", Strength: "associative recall: match query key", Shape: []int{8, 8}, Kind: "assoc", NeedHead: true},
+		{Name: "mamba", Strength: "selective SSM associative recall", Shape: []int{8, 8}, Kind: "assoc", NeedHead: true},
+		{Name: "gdn", Strength: "gated delta associative recall (f32)", Shape: []int{8, 8}, Kind: "assoc", NeedHead: true},
+		{Name: "embedding", Strength: "token-id XOR of first two ids", Shape: []int{8}, Kind: "tokens", NeedHead: true},
+		{Name: "swiglu", Strength: "gated FFN on pairwise XOR", Shape: []int{8}, Kind: "xor", NeedHead: true},
+		{Name: "layernorm", Strength: "XOR after random per-sample scale", Shape: []int{8}, Kind: "xor-scale", NeedHead: true},
+		{Name: "rmsnorm", Strength: "XOR after random per-sample scale", Shape: []int{8}, Kind: "xor-scale", NeedHead: true},
+		{Name: "softmax", Strength: "overlapping XOR → softmax vs one-hot", Shape: []int{8}, Kind: "xor", NeedHead: false},
+		{Name: "kmeans", Strength: "overlapping XOR clusters", Shape: []int{8}, Kind: "xor", NeedHead: false},
+		{Name: "sequential", Strength: "stacked dense on pairwise XOR", Shape: []int{8}, Kind: "xor", NeedHead: true},
+		{Name: "residual", Strength: "skip + dense F on pairwise XOR", Shape: []int{8}, Kind: "xor", NeedHead: true},
+		{Name: "parallel", Strength: "two-way add on pairwise XOR", Shape: []int{8}, Kind: "xor", NeedHead: true},
+		{Name: "metacognition", Strength: "heuristic-wrapped XOR", Shape: []int{8}, Kind: "xor", NeedHead: true},
 	}
 }
 

@@ -26,6 +26,7 @@ func main() {
 	layer := flag.String("layer", "", "run a single layer tide (no ocean)")
 	parallelN := flag.Int("parallel", 4, "how many layer tides train at once")
 	trainN := flag.Int("train-n", sprint.TrainN, "synthetic train examples per cell")
+	cellMS := flag.Int("cell-ms", sprint.CellMS, "min wall-clock ms per cell (0 = one epoch then stop; 2000 = test48 perm race)")
 	autostart := flag.Bool("autostart", true, "signal Start on every layer tide after dashboards are up")
 	oceanOnly := flag.Bool("ocean-only", false, "only serve ocean; poll -peers (any existing tides)")
 	peers := flag.String("peers", "", "ocean-only: comma list of tide origins")
@@ -39,6 +40,7 @@ func main() {
 		opt := sprint.DefaultOptions(*layer)
 		opt.Mode = *mode
 		opt.TrainN = *trainN
+		opt.CellMS = *cellMS
 		opt.Autostart = *autostart
 		opt.Fresh = *fresh
 		if err := sprint.RunLayer(ctx, opt); err != nil && ctx.Err() == nil {
@@ -82,6 +84,7 @@ func main() {
 			opt.Addr = addr
 			opt.Mode = *mode
 			opt.TrainN = *trainN
+			opt.CellMS = *cellMS
 			opt.Fresh = *fresh
 			opt.Autostart = false
 			opt.WaitStart = true
@@ -106,8 +109,8 @@ func main() {
 	fmt.Println("════════════════════════════════════════════════════════════")
 	fmt.Println(" quick_sprint — one tide per Welvet layer, ocean consolidates")
 	fmt.Printf(" ocean:  %s\n", httpURL(*oceanAddr))
-	fmt.Printf(" layers: %d  parallel=%d  mode=%s  train-n=%d\n", len(oceanPeers), *parallelN, *mode, *trainN)
-	fmt.Println(" each tide: all dtypes × all train modes × FormatNone (Lucy pulse)")
+	fmt.Printf(" layers: %d  parallel=%d  mode=%s  train-n=%d  cell-ms=%d\n", len(oceanPeers), *parallelN, *mode, *trainN, *cellMS)
+	fmt.Println(" each tide: per-layer toy (XOR / sine / delay / assoc) · Lucy min wall per cell")
 	fmt.Println("════════════════════════════════════════════════════════════")
 	for _, p := range oceanPeers {
 		fmt.Printf("  %-14s %s\n", p.Name, p.URL)

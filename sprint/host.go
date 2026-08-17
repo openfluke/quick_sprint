@@ -26,6 +26,7 @@ type Options struct {
 	Mode      string // sprint | smoke | screen | full
 	CkptDir   string
 	TrainN    int
+	CellMS    int // Lucy wall-clock floor per cell (0 = one epoch then stop)
 	Batch     int // permute dashboard batch
 	Micro     int
 	LR        float64
@@ -44,6 +45,7 @@ func DefaultOptions(layer string) Options {
 		Mode:      "sprint",
 		CkptDir:   "results/" + layer + "/checkpoint",
 		TrainN:    TrainN,
+		CellMS:    CellMS,
 		Batch:     8,
 		Micro:     Batch,
 		LR:        0.05,
@@ -90,6 +92,9 @@ func RunLayer(ctx context.Context, opt Options) error {
 	if opt.TrainN < Batch {
 		opt.TrainN = TrainN
 	}
+	if opt.CellMS < 0 {
+		opt.CellMS = 0
+	}
 	if opt.Micro < 1 {
 		opt.Micro = Batch
 	}
@@ -116,8 +121,8 @@ func RunLayer(ctx context.Context, opt Options) error {
 		Epoch:    epoch,
 		Task:     spec.Name,
 		ID:       spec.Name,
-		Subtitle: fmt.Sprintf("%s layer · cameral heads 1/2/3 · %s · 1 epoch · %d train · pulse %dms · SIMD %v",
-			spec.Name, spec.Strength, opt.TrainN, opt.PulseMS, simd.Enabled()),
+		Subtitle: fmt.Sprintf("%s layer · cameral 1/2/3 · %s · min %dms/cell · %d train · pulse %dms · SIMD %v",
+			spec.Name, spec.Strength, opt.CellMS, opt.TrainN, opt.PulseMS, simd.Enabled()),
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
@@ -134,6 +139,9 @@ func RunLayer(ctx context.Context, opt Options) error {
 		cfg.CheckpointEvery = 30 * time.Second
 	}
 	cfg.LR = opt.LR
+	if opt.CellMS > 0 {
+		cfg.CellMin = time.Duration(opt.CellMS) * time.Millisecond
+	}
 	cfg.Store = store
 	cfg.Resume = resume
 	cfg.Build = func(cell permute.Cell) (runner.Net, error) {

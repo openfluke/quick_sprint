@@ -200,7 +200,7 @@ func buildStack(spec Spec, cell permute.Cell, rng *rand.Rand) (*parallel.Stack, 
 		}
 		return withViewHead(l, cfg.Filters*cfg.OutLen(), cell, rng)
 	case "cnn2":
-		cfg := cnn2.Config{InChannels: 1, Filters: 2, Height: 6, Width: 6, Kernel: 3, Padding: 0, Activation: core.ActivationTanh}
+		cfg := cnn2.Config{InChannels: 1, Filters: 2, Height: 8, Width: 8, Kernel: 3, Padding: 0, Activation: core.ActivationTanh}
 		l, err := cnn2.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.Filters*cfg.PatchDim(), rng))
 		if err != nil {
 			return nil, err
