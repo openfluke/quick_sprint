@@ -20,7 +20,7 @@ import (
 func main() {
 	oceanAddr := flag.String("ocean", "0.0.0.0:8090", "ocean (master) dashboard address")
 	basePort := flag.Int("base-port", 8101, "first layer tide port (dense=base, cnn1=base+1, …)")
-	bind := flag.String("bind", "127.0.0.1", "host each layer tide binds")
+	bind := flag.String("bind", "0.0.0.0", "host each layer tide binds (0.0.0.0 = reachable on the LAN; ocean still polls 127.0.0.1)")
 	mode := flag.String("mode", "sprint", "sprint | smoke | screen | full")
 	layers := flag.String("layers", "", "comma list (default: all 22)")
 	layer := flag.String("layer", "", "run a single layer tide (no ocean)")
