@@ -58,3 +58,18 @@ func EnvInt(key string, fallback int) int {
 	}
 	return n
 }
+
+func EnvBool(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return fallback
+	}
+	switch v {
+	case "1", "true", "yes", "on", "y":
+		return true
+	case "0", "false", "no", "off", "n":
+		return false
+	default:
+		return fallback
+	}
+}

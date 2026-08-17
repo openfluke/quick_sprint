@@ -1,3 +1,4 @@
 results/
 **/checkpoint/
 *.exe
+.env

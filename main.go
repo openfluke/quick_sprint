@@ -35,7 +35,7 @@ func main() {
 	peerName := flag.String("name", sprint.EnvOr("TIDE_NAME", ""), "ocean peer id (default: layer or layer-modes)")
 	addr := flag.String("addr", sprint.EnvOr("TIDE_ADDR", ""), "worker listen address (default 0.0.0.0:8080)")
 	oceanOnly := flag.Bool("ocean-only", false, "only serve ocean; poll -peers and/or wait for worker /api/register")
-	autostart := flag.Bool("autostart", true, "start training without waiting for ocean Start all")
+	autostart := flag.Bool("autostart", sprint.EnvBool("TIDE_AUTOSTART", true), "start training without waiting for ocean Start all")
 	waitStart := flag.Bool("wait-start", false, "wait for /api/start (implied when -ocean-url is set)")
 	peers := flag.String("peers", sprint.EnvOr("TIDE_PEERS", ""), "ocean-only: comma list of tide origins (optional if workers register)")
 	fresh := flag.Bool("fresh", false, "ignore per-layer checkpoints")

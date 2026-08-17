@@ -29,7 +29,7 @@ func LayerMain(layer string) {
 	lr := flag.Float64("lr", opt.LR, "learning rate")
 	pulseMS := flag.Int("pulse-ms", opt.PulseMS, "Lucy pulse interval (ms)")
 	fresh := flag.Bool("fresh", false, "ignore checkpoint")
-	autostart := flag.Bool("autostart", true, "start training without the dashboard button")
+	autostart := flag.Bool("autostart", EnvBool("TIDE_AUTOSTART", true), "start training without the dashboard button")
 	wait := flag.Bool("wait-start", false, "ignore autostart and wait for /api/start")
 	flag.Parse()
 	opt.Addr = *addr
