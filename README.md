@@ -6,7 +6,8 @@ the best **train mode** and **dtype** per layer, then holistically.
 
 This is the cheap cousin of [`live_mnist`](../live_mnist): synthetic 4-class
 data (256 train examples), `permute.Sprint()` (all dtypes × FormatNone × all
-train modes × cnn-arch token). Not the month-long Full matrix.
+train modes × **single / bicameral / tricameral**). **One epoch only** — the
+point is a cheap scan for a default recipe, not a month-long Full matrix.
 
 Tide itself is unchanged for MNIST. `runner.Config.Build` is optional; live_mnist
 leaves it nil and still uses `chain.Model`.
@@ -55,10 +56,10 @@ Ocean can list any mix of live_mnist + layer tides.
 
 | Flag | Cells (approx) | Notes |
 |------|----------------|-------|
-| `-mode sprint` (default) | ~782 / layer | 34 dtypes × 23 modes × FormatNone |
-| `-mode smoke` | small | dashboard check |
-| `-mode screen` | Lucy 6 × numeric | closer to live_mnist screen |
-| `-mode full` | packed quants too | still ArchCNN only here |
+| `-mode sprint` (default) | ~2.3k / layer | 34 dtypes × 23 modes × FormatNone × 3 cameral |
+| `-mode smoke` | small | dashboard check, still 3 arches |
+| `-mode screen` | Lucy 6 × numeric × 3 arches | closer to live_mnist screen |
+| `-mode full` | packed quants too | all 3 arches |
 
 Pulse is **50ms** so a ~200–400ms cell still records Lucy windows, Score,
 Availability, SoftAcc, time-to-acc.
@@ -77,12 +78,21 @@ Availability, SoftAcc, time-to-acc.
 
 Ocean `GET /api/report.pdf` pulls every live tide report and stitches one master PDF (also written to `results/ocean-report.pdf`). Each finished epoch also writes `results/<layer>/report-epochN.pdf`.
 
-The progress bar is **this epoch** (`done/plan`, usually 782). A number like `1073/782` was recorded cells across epochs — epoch 1 finished, epoch 2 kept going. The bar is now capped at 100% and the label shows recorded separately.
+The progress bar is **this epoch** (`done/plan`). quick_sprint never starts
+epoch 2; a restart with new cameral IDs only trains the missing cells.
 
 CORS `*` is on so another page can fetch a tide directly.
 
 ## Findings
 
-Ocean’s holistic vote is: **plurality of per-tide best-Score cells**, tie-break
-mean Score — once for train mode, once for dtype. The per-layer table is the
-individual-layer answer. Checkpoints stay under `results/<layer>/checkpoint`.
+Ocean’s Score vote is: **plurality of per-tide best-Score cells**, tie-break
+mean Score — once for train mode, once for dtype, once for cameral arch.
+
+It also crowns an ocean-wide winner on every Lucy axis: Score, SoftAcc, hard
+Acc, Throughput, Availability, SoftAcc×Throughput, realtime
+(Throughput×Availability), AdaptPct, keep-learning (late SoftAcc still rising),
+AccPerSec, time-to-50%, Consistency, Stability, MobileScore. **Suggested
+default** is the mode/dtype/arch that wins the most of those axes.
+
+The per-layer table is the individual-layer answer. Checkpoints stay under
+`results/<layer>/checkpoint`.

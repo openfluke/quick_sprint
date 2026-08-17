@@ -45,7 +45,7 @@ func BuildNet(layer string, cell permute.Cell) (runner.Net, error) {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(cell.ID + layer))
 	rng := rand.New(rand.NewPCG(h.Sum64(), 0x51A7E))
-	stack, err := buildStack(spec, rng)
+	stack, err := buildStack(spec, cell, rng)
 	if err != nil {
 		return nil, err
 	}
@@ -80,94 +80,174 @@ func denseHead(in int, rng *rand.Rand) (*dense.Layer, error) {
 	return dense.NewConfigured(in, Classes, core.ActivationLinear, core.DTypeFloat32, quant.FormatNone, randN(in*Classes, rng))
 }
 
+func camsOf(cell permute.Cell) int {
+	n := cell.Cams
+	if n < 1 {
+		n = permute.CamsOf(cell.Arch)
+	}
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// classTail is Dense→Classes (single) or DenseIn → Parallel(n×Dense, add) → DenseOut (bi/tri).
+func classTail(inFeat int, cell permute.Cell, rng *rand.Rand) ([]any, error) {
+	if camsOf(cell) < 2 {
+		h, err := denseHead(inFeat, rng)
+		if err != nil {
+			return nil, err
+		}
+		return []any{h}, nil
+	}
+	return cameralSandwich(inFeat, Classes, camsOf(cell), rng)
+}
+
+func featureCameral(inFeat int, cell permute.Cell, rng *rand.Rand) ([]any, error) {
+	n := camsOf(cell)
+	if n < 2 {
+		return nil, nil
+	}
+	parts, err := cameralSandwich(inFeat, inFeat, n, rng)
+	if err != nil {
+		return nil, err
+	}
+	// drop class DenseOut — last item — keep DenseIn + Parallel for feature mixing
+	if len(parts) < 3 {
+		return parts, nil
+	}
+	return parts[:len(parts)-1], nil
+}
+
+func cameralSandwich(inFeat, outFeat, cams int, rng *rand.Rand) ([]any, error) {
+	hidden := inFeat
+	if hidden < 4 {
+		hidden = 8
+	}
+	din, err := dense.NewConfigured(inFeat, hidden, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(inFeat*hidden, rng))
+	if err != nil {
+		return nil, err
+	}
+	branches := make([]any, cams)
+	for i := 0; i < cams; i++ {
+		b, err := dense.NewConfigured(hidden, hidden, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(hidden*hidden, rng))
+		if err != nil {
+			return nil, fmt.Errorf("hemi %d: %w", i, err)
+		}
+		branches[i] = b
+	}
+	para, err := parallel.NewFromBranches(parallel.Config{
+		Dim: hidden, OutFeat: hidden, Branches: cams, Combine: parallel.CombineAdd,
+	}, branches, nil)
+	if err != nil {
+		return nil, err
+	}
+	dout, err := dense.NewConfigured(hidden, outFeat, core.ActivationLinear, core.DTypeFloat32, quant.FormatNone, randN(hidden*outFeat, rng))
+	if err != nil {
+		return nil, err
+	}
+	return []any{din, para, dout}, nil
+}
+
 func stackOf(kids ...any) (*parallel.Stack, error) {
 	return parallel.NewStack(kids...)
 }
 
-func withViewHead(subject any, flat int, rng *rand.Rand) (*parallel.Stack, error) {
+func stackJoin(prefix []any, extra ...any) (*parallel.Stack, error) {
+	return stackOf(append(prefix, extra...)...)
+}
+
+func withViewHead(subject any, flat int, cell permute.Cell, rng *rand.Rand) (*parallel.Stack, error) {
 	v, err := parallel.NewView(Batch, flat)
 	if err != nil {
 		return nil, err
 	}
-	h, err := denseHead(flat, rng)
+	tail, err := classTail(flat, cell, rng)
 	if err != nil {
 		return nil, err
 	}
-	return stackOf(subject, v, h)
+	return stackJoin([]any{subject, v}, tail...)
 }
 
-func withHead(subject any, in int, rng *rand.Rand) (*parallel.Stack, error) {
-	h, err := denseHead(in, rng)
+func withHead(subject any, in int, cell permute.Cell, rng *rand.Rand) (*parallel.Stack, error) {
+	tail, err := classTail(in, cell, rng)
 	if err != nil {
 		return nil, err
 	}
-	return stackOf(subject, h)
+	return stackJoin([]any{subject}, tail...)
 }
 
-func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
+func buildStack(spec Spec, cell permute.Cell, rng *rand.Rand) (*parallel.Stack, error) {
 	switch spec.Name {
 	case "dense":
-		d, err := dense.NewConfigured(8, Classes, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(8*Classes, rng))
+		if camsOf(cell) < 2 {
+			d, err := dense.NewConfigured(8, Classes, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(8*Classes, rng))
+			if err != nil {
+				return nil, err
+			}
+			return stackOf(d)
+		}
+		tail, err := classTail(8, cell, rng)
 		if err != nil {
 			return nil, err
 		}
-		return stackOf(d)
+		return stackOf(tail...)
 	case "cnn1":
 		cfg := cnn1.Config{InChannels: 1, Filters: 4, SeqLen: 16, Kernel: 3, Stride: 1, Activation: core.ActivationTanh}
 		l, err := cnn1.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.Filters*cfg.PatchDim(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.Filters*cfg.OutLen(), rng)
+		return withViewHead(l, cfg.Filters*cfg.OutLen(), cell, rng)
 	case "cnn2":
 		cfg := cnn2.Config{InChannels: 1, Filters: 2, Height: 6, Width: 6, Kernel: 3, Padding: 0, Activation: core.ActivationTanh}
 		l, err := cnn2.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.Filters*cfg.PatchDim(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.Filters*cfg.OutH()*cfg.OutW(), rng)
+		return withViewHead(l, cfg.Filters*cfg.OutH()*cfg.OutW(), cell, rng)
 	case "cnn3":
 		cfg := cnn3.Config{InChannels: 1, Filters: 2, Depth: 4, Height: 4, Width: 4, Kernel: 2, Stride: 2, Activation: core.ActivationTanh}
 		l, err := cnn3.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.Filters*cfg.PatchDim(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.Filters*cfg.OutD()*cfg.OutH()*cfg.OutW(), rng)
+		return withViewHead(l, cfg.Filters*cfg.OutD()*cfg.OutH()*cfg.OutW(), cell, rng)
 	case "convt1":
 		cfg := convt1.Config{InChannels: 2, Filters: 2, SeqLen: 4, Kernel: 3, Stride: 2, OutputPadding: 1, Activation: core.ActivationTanh}
 		l, err := convt1.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.Filters*cfg.PatchDim(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.Filters*cfg.OutLen(), rng)
+		return withViewHead(l, cfg.Filters*cfg.OutLen(), cell, rng)
 	case "convt2":
 		cfg := convt2.Config{InChannels: 2, Filters: 2, Height: 2, Width: 2, Kernel: 3, Stride: 2, OutputPadding: 1, Activation: core.ActivationTanh}
 		l, err := convt2.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.Filters*cfg.PatchDim(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.Filters*cfg.OutH()*cfg.OutW(), rng)
+		return withViewHead(l, cfg.Filters*cfg.OutH()*cfg.OutW(), cell, rng)
 	case "convt3":
 		cfg := convt3.Config{InChannels: 2, Filters: 2, Depth: 2, Height: 2, Width: 2, Kernel: 2, Stride: 1, Activation: core.ActivationTanh}
 		l, err := convt3.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.Filters*cfg.PatchDim(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.Filters*cfg.OutD()*cfg.OutH()*cfg.OutW(), rng)
+		return withViewHead(l, cfg.Filters*cfg.OutD()*cfg.OutH()*cfg.OutW(), cell, rng)
 	case "rnn":
 		cfg := rnn.Config{InputSize: 4, HiddenSize: 8, SeqLen: 8}
 		l, err := rnn.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.WeightCount(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.SeqLen*cfg.HiddenSize, rng)
+		return withViewHead(l, cfg.SeqLen*cfg.HiddenSize, cell, rng)
 	case "lstm":
 		cfg := lstm.Config{InputSize: 4, HiddenSize: 8, SeqLen: 8}
 		l, err := lstm.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.WeightCount(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.SeqLen*cfg.HiddenSize, rng)
+		return withViewHead(l, cfg.SeqLen*cfg.HiddenSize, cell, rng)
 	case "mha":
 		cfg := mha.Config{
 			DModel: 8, NumHeads: 2, MaxSeqLen: 8,
@@ -179,7 +259,7 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, 8*8, rng)
+		return withViewHead(l, 8*8, cell, rng)
 	case "mamba":
 		cfg := mamba.Config{DModel: 8, DState: 4, Expand: 2, SeqLen: 8}
 		inner := cfg.InnerDim()
@@ -188,7 +268,7 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, 8*8, rng)
+		return withViewHead(l, 8*8, cell, rng)
 	case "gdn":
 		l, err := gdn.New(gdn.Config{
 			HiddenSize: 8, NumKeyHeads: 1, NumValueHeads: 1,
@@ -197,14 +277,14 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, 8*8, rng)
+		return withViewHead(l, 8*8, cell, rng)
 	case "embedding":
 		cfg := embedding.Config{VocabSize: 16, EmbeddingDim: 8, SeqLen: 8}
 		l, err := embedding.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone, randN(cfg.WeightCount(), rng))
 		if err != nil {
 			return nil, err
 		}
-		return withViewHead(l, cfg.SeqLen*cfg.EmbeddingDim, rng)
+		return withViewHead(l, cfg.SeqLen*cfg.EmbeddingDim, cell, rng)
 	case "swiglu":
 		cfg := swiglu.Config{InputDim: 8, IntermediateDim: 16}
 		l, err := swiglu.NewConfigured(cfg, core.DTypeFloat32, quant.FormatNone,
@@ -212,7 +292,7 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		return withHead(l, 8, rng)
+		return withHead(l, 8, cell, rng)
 	case "layernorm":
 		stem, err := dense.NewConfigured(8, 8, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(64, rng))
 		if err != nil {
@@ -226,11 +306,11 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		h, err := denseHead(8, rng)
+		tail, err := classTail(8, cell, rng)
 		if err != nil {
 			return nil, err
 		}
-		return stackOf(stem, ln, h)
+		return stackJoin([]any{stem, ln}, tail...)
 	case "rmsnorm":
 		stem, err := dense.NewConfigured(8, 8, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(64, rng))
 		if err != nil {
@@ -244,13 +324,13 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		h, err := denseHead(8, rng)
+		tail, err := classTail(8, cell, rng)
 		if err != nil {
 			return nil, err
 		}
-		return stackOf(stem, rn, h)
+		return stackJoin([]any{stem, rn}, tail...)
 	case "softmax":
-		d, err := dense.NewConfigured(8, Classes, core.ActivationLinear, core.DTypeFloat32, quant.FormatNone, randN(8*Classes, rng))
+		tail, err := classTail(8, cell, rng)
 		if err != nil {
 			return nil, err
 		}
@@ -258,7 +338,7 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		return stackOf(d, sm)
+		return stackJoin(tail, sm)
 	case "kmeans":
 		l, err := kmeans.NewConfigured(kmeans.Config{
 			NumClusters: Classes, FeatureDim: 8, OutputMode: kmeans.OutputProbabilities,
@@ -266,7 +346,14 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		return stackOf(l)
+		feat, err := featureCameral(8, cell, rng)
+		if err != nil {
+			return nil, err
+		}
+		if len(feat) == 0 {
+			return stackOf(l)
+		}
+		return stackJoin(feat, l)
 	case "sequential":
 		a, err := dense.NewConfigured(8, 8, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(64, rng))
 		if err != nil {
@@ -280,7 +367,7 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		return withHead(seq, 8, rng)
+		return withHead(seq, 8, cell, rng)
 	case "residual":
 		f, err := dense.NewConfigured(8, 8, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(64, rng))
 		if err != nil {
@@ -290,7 +377,7 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		return withHead(res, 8, rng)
+		return withHead(res, 8, cell, rng)
 	case "parallel":
 		stem, err := dense.NewConfigured(8, 8, core.ActivationTanh, core.DTypeFloat32, quant.FormatNone, randN(64, rng))
 		if err != nil {
@@ -310,17 +397,17 @@ func buildStack(spec Spec, rng *rand.Rand) (*parallel.Stack, error) {
 		if err != nil {
 			return nil, err
 		}
-		h, err := denseHead(8, rng)
+		tail, err := classTail(8, cell, rng)
 		if err != nil {
 			return nil, err
 		}
-		return stackOf(stem, para, h)
+		return stackJoin([]any{stem, para}, tail...)
 	case "metacognition":
 		mc, err := metacognition.NewConfigured(metacognition.Config{Dim: 8}, core.DTypeFloat32, quant.FormatNone, randN(64, rng))
 		if err != nil {
 			return nil, err
 		}
-		return withHead(mc, 8, rng)
+		return withHead(mc, 8, cell, rng)
 	default:
 		return nil, fmt.Errorf("no stack builder for %s", spec.Name)
 	}

@@ -56,6 +56,37 @@ func TestBuildAndStepLayers(t *testing.T) {
 	}
 }
 
+func TestBuildCameralArches(t *testing.T) {
+	for _, spec := range []string{"dense", "cnn2", "softmax", "kmeans", "parallel", "layernorm"} {
+		for _, arch := range permute.AllArches() {
+			c := testCell()
+			c.Arch = arch
+			c.Cams = permute.CamsOf(arch)
+			c.ID = c.String()
+			net, err := BuildNet(spec, c)
+			if err != nil {
+				t.Fatalf("%s %s: %v", spec, arch, err)
+			}
+			ds := newSynth(mustSpec(spec), Batch, Batch, Batch, 2)
+			s := ds.NextServe("A")
+			if _, err := net.TrainStep(s.X, s.Target, 0.05, permute.ModeSGD); err != nil {
+				t.Fatalf("%s %s train: %v", spec, arch, err)
+			}
+			if _, _, err := net.ServeEval(s.X, s.Target); err != nil {
+				t.Fatalf("%s %s serve: %v", spec, arch, err)
+			}
+		}
+	}
+}
+
+func mustSpec(name string) Spec {
+	s, err := Lookup(name)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
 func TestGDNNonFloat32Gaps(t *testing.T) {
 	c := testCell()
 	c.DType = core.DTypeInt8
