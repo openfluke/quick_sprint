@@ -116,7 +116,8 @@ func RunLayer(ctx context.Context, opt Options) error {
 		Epoch:    epoch,
 		Task:     spec.Name,
 		ID:       spec.Name,
-		Subtitle: fmt.Sprintf("%s · 1 epoch · %d train · pulse %dms · SIMD %v", spec.Strength, opt.TrainN, opt.PulseMS, simd.Enabled()),
+		Subtitle: fmt.Sprintf("%s layer · cameral heads 1/2/3 · %s · 1 epoch · %d train · pulse %dms · SIMD %v",
+			spec.Name, spec.Strength, opt.TrainN, opt.PulseMS, simd.Enabled()),
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
